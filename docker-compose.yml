@@ -1,0 +1,69 @@
+# GlobalShop — cluster CockroachDB 4 nœuds + 2 API + HAProxy
+# Démarrage : docker compose up -d --build
+x-roach: &roach
+  image: cockroachdb/cockroach:v24.3.0   # vérifier/ajuster le tag si besoin
+  restart: "no"
+
+services:
+  roach1:
+    <<: *roach
+    container_name: roach1
+    hostname: roach1
+    command: start --insecure --join=roach1:26257,roach2:26257,roach3:26257,roach4:26257 --advertise-addr=roach1:26257 --locality=region=afrique --cache=.15 --max-sql-memory=.15
+    ports: ["26257:26257", "8080:8080"]
+  roach2:
+    <<: *roach
+    container_name: roach2
+    hostname: roach2
+    command: start --insecure --join=roach1:26257,roach2:26257,roach3:26257,roach4:26257 --advertise-addr=roach2:26257 --locality=region=europe --cache=.15 --max-sql-memory=.15
+    ports: ["8081:8080"]
+  roach3:
+    <<: *roach
+    container_name: roach3
+    hostname: roach3
+    command: start --insecure --join=roach1:26257,roach2:26257,roach3:26257,roach4:26257 --advertise-addr=roach3:26257 --locality=region=amerique --cache=.15 --max-sql-memory=.15
+    ports: ["8082:8080"]
+  roach4:
+    <<: *roach
+    container_name: roach4
+    hostname: roach4
+    command: start --insecure --join=roach1:26257,roach2:26257,roach3:26257,roach4:26257 --advertise-addr=roach4:26257 --locality=region=asie --cache=.15 --max-sql-memory=.15
+    ports: ["8083:8080"]
+
+  # Initialise le cluster (une seule fois) puis charge le schéma SQL
+  init:
+    <<: *roach
+    container_name: roach-init
+    depends_on: [roach1, roach2, roach3, roach4]
+    volumes: ["./db/schema.sql:/schema.sql:ro"]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 30); do
+          ./cockroach init --insecure --host=roach1:26257 2>&1 | grep -qiE "initialized|already" && break
+          sleep 2
+        done
+        for i in $$(seq 1 30); do
+          ./cockroach sql --insecure --host=roach1:26257 -f /schema.sql && exit 0
+          sleep 2
+        done
+        exit 1
+
+  api1: &api
+    build: ./api
+    container_name: api1
+    depends_on:
+      init: { condition: service_completed_successfully }
+    environment:
+      NODES: "afrique=roach1,europe=roach2,amerique=roach3,asie=roach4"
+      POOL_MAX: "20"
+  api2:
+    <<: *api
+    container_name: api2
+
+  haproxy:
+    image: haproxy:2.9
+    container_name: haproxy
+    depends_on: [api1, api2]
+    volumes: ["./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    ports: ["8000:8000"]
